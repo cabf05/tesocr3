@@ -5,6 +5,7 @@ opencv-python-headless==4.9.0.80
 numpy==1.26.4
 pillow==10.2.0
 easyocr==1.7.1
-python-doctr[torch]==0.8.0
+python-doctr[torch]==0.8.1
 requests==2.31.0
-torch==2.2.2+cpu --extra-index-url=https://download.pytorch.org/whl/cpu
+torch==2.3.0 --extra-index-url https://download.pytorch.org/whl/cpu
+torchvision==0.18.0 --extra-index-url https://download.pytorch.org/whl/cpu
