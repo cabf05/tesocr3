@@ -1,220 +1,184 @@
+import os
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
 import streamlit as st
+import pytesseract
+from PIL import Image
+import numpy as np
 import easyocr
 import requests
-from PIL import Image
+from pdf2image import convert_from_bytes
 import io
-import pytesseract
 from doctr.io import DocumentFile
 from doctr.models import ocr_predictor
+import cv2
+import base64
 
-# Funções de extração de texto
-def extract_with_easyocr(image, lang=['pt', 'en'], paragraph=True):
-    """Extrai texto de uma imagem usando EasyOCR."""
-    reader = easyocr.Reader(lang)
-    result = reader.readtext(image, paragraph=paragraph)
-    return "\n".join([text for _, text, _ in result])
+# Configuração inicial
+st.set_page_config(page_title="Sistema OCR Multi-Ferramentas", layout="wide")
 
-def extract_with_ocr_space(image, api_key, lang='por'):
-    """Extrai texto usando a API OCR.Space."""
-    url = "https://api.ocr.space/parse/image"
-    img_buffer = io.BytesIO()
-    image.save(img_buffer, format="PNG")
-    payload = {"apikey": api_key, "language": lang, "isOverlayRequired": False}
-    files = {"file": ("image.png", img_buffer.getvalue(), "image/png")}
-    response = requests.post(url, files=files, data=payload)
-    if response.status_code == 200:
-        result = response.json()
-        return result.get("ParsedResults", [{}])[0].get("ParsedText", "Erro na extração")
-    return f"Erro na API OCR.Space: {response.status_code}"
+# Inicialização do session state
+if 'ocr_tool' not in st.session_state:
+    st.session_state.ocr_tool = None
+if 'config' not in st.session_state:
+    st.session_state.config = {}
+if 'page' not in st.session_state:
+    st.session_state.page = 'config'
 
-def extract_with_taggun(image, api_key, lang='auto'):
-    """Extrai texto usando a API Taggun, otimizada para recibos."""
-    url = "https://api.taggun.io/api/receipt/v1/verbose/file"
-    img_buffer = io.BytesIO()
-    image.save(img_buffer, format="PNG")
-    headers = {"apikey": api_key}
-    files = {"file": ("image.png", img_buffer.getvalue(), "image/png")}
-    payload = {"language": lang}
-    response = requests.post(url, headers=headers, files=files, data=payload)
-    if response.status_code == 200:
-        result = response.json()
-        return result.get("text", {}).get("value", "Erro na extração")
-    return f"Erro na API Taggun: {response.status_code}"
+# Pré-carregar modelos
+@st.cache_resource
+def load_easyocr():
+    return easyocr.Reader(['en', 'pt'], gpu=False)
 
-def extract_with_free_ocr(image, lang='por'):
-    """Extrai texto usando a Free OCR API."""
-    url = "https://free.ocr.space/OCRAPI"
-    img_buffer = io.BytesIO()
-    image.save(img_buffer, format="PNG")
-    payload = {"language": lang, "isOverlayRequired": False}
-    files = {"filename": ("image.png", img_buffer.getvalue(), "image/png")}
-    response = requests.post(url, files=files, data=payload)
-    if response.status_code == 200:
-        result = response.json()
-        return result.get("ParsedResults", [{}])[0].get("ParsedText", "Erro na extração")
-    return f"Erro na Free OCR API: {response.status_code}"
-
-def extract_with_pytesseract(image, lang='por+eng', psm=3):
-    """Extrai texto usando Pytesseract (Tesseract OCR)."""
-    try:
-        text = pytesseract.image_to_string(image, lang=lang, config=f'--psm {psm}')
-        return text
-    except Exception as e:
-        return f"Erro ao usar Pytesseract: {str(e)}"
-
-def extract_with_doctr(image, lang='pt'):
-    """Extrai texto usando DocTR para documentos estruturados."""
-    try:
-        img_buffer = io.BytesIO()
-        image.save(img_buffer, format="PNG")
-        img_buffer.seek(0)
-        doc = DocumentFile.from_images(img_buffer)
-        predictor = ocr_predictor(pretrained=True)
-        result = predictor(doc)
-        text = "\n".join([word.value for page in result.pages for block in page.blocks for line in block.lines for word in line.words])
-        return text
-    except Exception as e:
-        return f"Erro ao usar DocTR: {str(e)}"
-
-# Configuração inicial da sessão
-if "tool" not in st.session_state:
-    st.session_state.tool = None
-    st.session_state.api_keys = {"OCR.Space": "", "Taggun": ""}
-    st.session_state.params = {}
-
-# Navegação entre páginas
-st.sidebar.title("Navegação")
-page = st.sidebar.radio("Escolha a página", ["Configuração", "Uso"])
-
-if page == "Configuração":
-    st.title("Configuração da Ferramenta OCR")
-    st.write("Escolha e configure a ferramenta de OCR que deseja usar.")
-
-    # Seleção da ferramenta com ajuda
-    tool = st.selectbox(
-        "Escolha a ferramenta OCR",
-        ["EasyOCR", "OCR.Space", "Taggun", "Free OCR API", "Pytesseract", "DocTR"],
-        help="EasyOCR: Ideal para textos simples. OCR.Space: Boa para textos curtos. Taggun: Ótima para recibos. Free OCR API: Simples e gratuita. Pytesseract: Usa Tesseract OCR. DocTR: Para documentos estruturados."
+@st.cache_resource
+def load_doctr(model_type='accurate'):
+    return ocr_predictor(
+        det_arch='db_resnet50' if model_type == 'accurate' else 'db_mobilenet_v3_large',
+        reco_arch='crnn_vgg16_bn' if model_type == 'accurate' else 'crnn_mobilenet_v3_small',
+        pretrained=True
     )
 
-    # Configuração por ferramenta
-    if tool == "EasyOCR":
-        lang_options = st.multiselect(
-            "Idiomas", 
-            ["pt", "en"], 
-            default=["pt", "en"], 
-            help="Escolha os idiomas (Português: 'pt', Inglês: 'en'). Padrão: ambos."
-        )
-        paragraph = st.checkbox(
-            "Agrupar em parágrafos", 
-            value=True, 
-            help="Melhora a formatação do texto extraído. Padrão: ativado."
-        )
-        st.session_state.params = {"lang": lang_options, "paragraph": paragraph}
+# Página de configuração
+def config_page():
+    st.title("Configuração do Sistema OCR")
+    st.markdown("### Selecione e configure sua ferramenta OCR")
 
-    elif tool == "OCR.Space":
-        api_key = st.text_input(
-            "Chave da API OCR.Space", 
-            value=st.session_state.api_keys["OCR.Space"], 
-            type="password", 
-            help="Obtenha em ocr.space. Obrigatória para mais de 25 requisições/dia."
-        )
-        lang = st.selectbox(
-            "Idioma", 
-            ["por", "eng"], 
-            index=0, 
-            help="Português ('por') ou Inglês ('eng'). Padrão: Português."
-        )
-        st.session_state.api_keys["OCR.Space"] = api_key
-        st.session_state.params = {"lang": lang}
+    ocr_tool = st.selectbox(
+        "Ferramenta OCR:",
+        ["Tesseract OCR", "EasyOCR", "OCR.Space", "DocTR", "Taggun", "Free OCR API"],
+        index=0
+    )
 
-    elif tool == "Taggun":
-        api_key = st.text_input(
-            "Chave da API Taggun", 
-            value=st.session_state.api_keys["Taggun"], 
-            type="password", 
-            help="Obtenha em taggun.io. Obrigatória para uso."
-        )
-        lang = st.selectbox(
-            "Idioma", 
-            ["auto", "pt", "en"], 
-            index=0, 
-            help="Automático ('auto') detecta o idioma, ou escolha Português ('pt') ou Inglês ('en'). Padrão: Automático."
-        )
-        st.session_state.api_keys["Taggun"] = api_key
-        st.session_state.params = {"lang": lang}
+    # Configurações específicas para cada ferramenta
+    if ocr_tool == "Tesseract OCR":
+        st.markdown("**Melhor para:** Documentos impressos de alta qualidade")
+        col1, col2 = st.columns(2)
+        with col1:
+            languages = st.text_input("Idiomas (ex: por+eng)", "por+eng")
+        with col2:
+            psm = st.selectbox("Modo Segmentação", [3, 6, 11, 12], format_func=lambda x: f"PSM {x}")
+        st.session_state.config = {"config": f"--psm {psm} -l {languages}"}
 
-    elif tool == "Free OCR API":
-        lang = st.selectbox(
-            "Idioma", 
-            ["por", "eng"], 
-            index=0, 
-            help="Português ('por') ou Inglês ('eng'). Padrão: Português."
-        )
-        st.session_state.params = {"lang": lang}
+    elif ocr_tool == "EasyOCR":
+        st.markdown("**Melhor para:** Imagens com fundo complexo")
+        langs = st.multiselect("Idiomas", ["en", "pt"], default=["en", "pt"])
+        st.session_state.config = {"langs": langs}
 
-    elif tool == "Pytesseract":
-        lang = st.selectbox(
-            "Idioma", 
-            ["por+eng", "por", "eng"], 
-            index=0, 
-            help="Padrão: português + inglês ('por+eng')."
-        )
-        psm = st.slider(
-            "PSM (Page Segmentation Mode)", 
-            1, 13, 3, 
-            help="3 é o padrão para segmentação automática."
-        )
-        st.session_state.params = {"lang": lang, "psm": psm}
+    elif ocr_tool == "OCR.Space":
+        st.markdown("**Melhor para:** Uso via API")
+        api_key = st.text_input("API Key", type="password")
+        language = st.selectbox("Idioma", ["por", "eng"])
+        st.session_state.config = {"api_key": api_key, "language": language, "engine": 1}
 
-    elif tool == "DocTR":
-        lang = st.selectbox(
-            "Idioma", 
-            ["pt", "en"], 
-            index=0, 
-            help="Padrão: português ('pt')."
-        )
-        st.session_state.params = {"lang": lang}
+    elif ocr_tool == "DocTR":
+        st.markdown("**Melhor para:** Layout complexo")
+        doc_lang = st.selectbox("Idioma", ["en", "pt"])
+        st.session_state.config = {"doc_lang": doc_lang, "model_type": "accurate"}
 
-    # Salvar configurações
+    elif ocr_tool == "Taggun":
+        st.markdown("**Melhor para:** Documentos fiscais")
+        api_key = st.text_input("API Key Taggun", type="password")
+        language = st.selectbox("Idioma", ["por", "eng"])
+        st.session_state.config = {"api_key": api_key, "language": language}
+
+    elif ocr_tool == "Free OCR API":
+        st.markdown("**Melhor para:** Uso rápido")
+        language = st.selectbox("Idioma", ["por", "eng"])
+        st.session_state.config = {"language": language}
+
     if st.button("Salvar Configuração"):
-        st.session_state.tool = tool
-        st.success(f"Ferramenta {tool} configurada com sucesso! Vá para a página 'Uso'.")
+        st.session_state.ocr_tool = ocr_tool
+        st.session_state.page = 'process'
+        st.rerun()
 
-elif page == "Uso":
-    st.title("Extrair Texto de Imagem")
+# Página de processamento
+def process_page():
+    st.title("Extrair Texto de Documentos")
     
-    if not st.session_state.tool:
-        st.error("Configure uma ferramenta na página 'Configuração' primeiro!")
-    else:
-        st.write(f"Ferramenta selecionada: {st.session_state.tool}")
-        
-        # Upload do arquivo
-        uploaded_file = st.file_uploader("Faça upload de uma imagem", type=["png", "jpg", "jpeg"])
-        
-        if uploaded_file:
-            image = Image.open(uploaded_file)
-            st.image(image, caption="Imagem carregada", use_column_width=True)
-            
-            if st.button("Extrair Texto"):
-                with st.spinner("Extraindo texto..."):
-                    try:
-                        if st.session_state.tool == "EasyOCR":
-                            text = extract_with_easyocr(image, **st.session_state.params)
-                        elif st.session_state.tool == "OCR.Space":
-                            text = extract_with_ocr_space(image, st.session_state.api_keys["OCR.Space"], **st.session_state.params)
-                        elif st.session_state.tool == "Taggun":
-                            if not st.session_state.api_keys["Taggun"]:
-                                text = "Forneça uma chave de API válida para Taggun."
-                            else:
-                                text = extract_with_taggun(image, st.session_state.api_keys["Taggun"], **st.session_state.params)
-                        elif st.session_state.tool == "Free OCR API":
-                            text = extract_with_free_ocr(image, **st.session_state.params)
-                        elif st.session_state.tool == "Pytesseract":
-                            text = extract_with_pytesseract(image, **st.session_state.params)
-                        elif st.session_state.tool == "DocTR":
-                            text = extract_with_doctr(image, **st.session_state.params)
-                        st.subheader("Texto Extraído")
-                        st.text_area("Resultado", text, height=300)
-                    except Exception as e:
-                        st.error(f"Erro ao extrair texto: {str(e)}")
+    uploaded_file = st.file_uploader("Carregue seu documento", type=["png", "jpg", "jpeg", "pdf"])
+    
+    if uploaded_file:
+        if st.button("Processar"):
+            try:
+                with st.spinner("Processando..."):
+                    # Converter PDF para imagens
+                    if uploaded_file.type == "application/pdf":
+                        images = convert_from_bytes(uploaded_file.read())
+                    else:
+                        images = [Image.open(uploaded_file)]
+
+                    full_text = ""
+                    
+                    # Tesseract
+                    if st.session_state.ocr_tool == "Tesseract OCR":
+                        for img in images:
+                            text = pytesseract.image_to_string(img, config=st.session_state.config['config'])
+                            full_text += text + "\n\n"
+                    
+                    # EasyOCR
+                    elif st.session_state.ocr_tool == "EasyOCR":
+                        reader = load_easyocr()
+                        for img in images:
+                            results = reader.readtext(np.array(img))
+                            full_text += "\n".join([res[1] for res in results]) + "\n\n"
+                    
+                    # OCR.Space
+                    elif st.session_state.ocr_tool == "OCR.Space":
+                        for img in images:
+                            img_bytes = io.BytesIO()
+                            img.save(img_bytes, format='PNG')
+                            response = requests.post(
+                                'https://api.ocr.space/parse/image',
+                                files={'file': img_bytes.getvalue()},
+                                data={'apikey': st.session_state.config['api_key'], 'language': st.session_state.config['language']}
+                            )
+                            full_text += response.json()['ParsedResults'][0]['ParsedText'] + "\n\n"
+                    
+                    # DocTR
+                    elif st.session_state.ocr_tool == "DocTR":
+                        predictor = load_doctr()
+                        for img in images:
+                            doc = predictor([np.array(img)])
+                            full_text += "\n".join([" ".join([w.value for w in line.words]) 
+                                                for block in doc.pages[0].blocks 
+                                                for line in block.lines]) + "\n\n"
+                    
+                    # Taggun
+                    elif st.session_state.ocr_tool == "Taggun":
+                        img_bytes = io.BytesIO()
+                        images[0].save(img_bytes, format='PNG')
+                        response = requests.post(
+                            'https://api.taggun.io/api/receipt/v1/simple/file',
+                            headers={'apikey': st.session_state.config['api_key']},
+                            files={'file': img_bytes.getvalue()},
+                            data={'language': st.session_state.config['language']}
+                        )
+                        full_text = response.json()['text']
+                    
+                    # Free OCR API
+                    elif st.session_state.ocr_tool == "Free OCR API":
+                        img_bytes = io.BytesIO()
+                        images[0].save(img_bytes, format='PNG')
+                        response = requests.post(
+                            'https://api.ocr.space/parse/image',
+                            files={'file': img_bytes},
+                            data={'apikey': 'helloworld', 'language': st.session_state.config['language']}
+                        )
+                        full_text = response.json()['ParsedResults'][0]['ParsedText']
+
+                    st.success("Texto extraído!")
+                    st.text_area("Resultado", full_text, height=400)
+
+            except Exception as e:
+                st.error(f"Erro: {str(e)}")
+
+    if st.button("Voltar"):
+        st.session_state.page = 'config'
+        st.rerun()
+
+# Controle de navegação
+if st.session_state.page == 'config':
+    config_page()
+else:
+    process_page()
