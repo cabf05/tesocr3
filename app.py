@@ -36,6 +36,10 @@ if 'config' not in st.session_state:
 # ===========================================
 # FUNÇÕES AUXILIARES
 # ===========================================
+@st.cache_resource
+def load_easyocr(langs):
+    return easyocr.Reader(langs, gpu=False)
+
 def preprocess_image(image, binarization_threshold=31, denoise_strength=10):
     """Melhora a qualidade da imagem para OCR."""
     try:
@@ -47,7 +51,6 @@ def preprocess_image(image, binarization_threshold=31, denoise_strength=10):
         return thresh
     except Exception as e:
         logger.error(f"Erro no pré-processamento: {e}")
-        st.error(f"Erro no pré-processamento: {e}")
         return None
 
 def correct_text_format(text):
@@ -74,6 +77,31 @@ def validate_extracted_text(text):
             return False
     return True
 
+def handle_ocrspace_api(img, config):
+    """Processamento específico para OCR.Space com tratamento de erros"""
+    try:
+        img_byte_arr = io.BytesIO()
+        img.save(img_byte_arr, format='PNG')
+        response = requests.post(
+            'https://api.ocr.space/parse/image',
+            files={'file': ('document.png', img_byte_arr.getvalue(), 'image/png')},
+            data={
+                'apikey': config['api_key'],
+                'language': config['language'],
+                'filetype': 'PNG',
+                'OCREngine': 2
+            }
+        )
+        result = response.json()
+        
+        if response.status_code != 200 or result.get('IsErroredOnProcessing', False):
+            error_msg = result.get('ErrorMessage', ['Erro desconhecido'])[0]
+            raise Exception(f"Erro na API: {error_msg}")
+            
+        return result['ParsedResults'][0]['ParsedText']
+    except Exception as e:
+        raise RuntimeError(f"Falha no OCR.Space: {str(e)}")
+
 # ===========================================
 # PÁGINA DE CONFIGURAÇÃO
 # ===========================================
@@ -81,7 +109,6 @@ def show_config_page():
     """Interface de configuração do OCR"""
     st.title("⚙️ Configuração do Sistema OCR")
     
-    # Seleção da ferramenta
     tools = {
         'Tesseract': {'icon': '🔍', 'desc': 'Documentos impressos de alta qualidade'},
         'EasyOCR': {'icon': '🎨', 'desc': 'Imagens com fundo complexo'},
@@ -96,7 +123,6 @@ def show_config_page():
         format_func=lambda x: f"{tools[x]['icon']} {x} - {tools[x]['desc']}"
     )
     
-    # Configurações específicas
     with st.expander("🔧 Configurações Avançadas", expanded=True):
         if selected_tool == 'Tesseract':
             col1, col2 = st.columns(2)
@@ -108,19 +134,12 @@ def show_config_page():
             st.session_state.config = {'psm': psm, 'oem': oem, 'lang': lang}
         
         elif selected_tool == 'EasyOCR':
-            langs = st.multiselect(
-                "Idiomas",
-                ['en', 'pt'],
-                default=['pt', 'en']
-            )
+            langs = st.multiselect("Idiomas", ['en', 'pt'], default=['pt', 'en'])
             st.session_state.config = {'langs': langs}
+            st.warning("A primeira execução pode demorar para baixar os modelos")
         
         elif selected_tool == 'DocTR':
-            model_type = st.selectbox(
-                "Tipo de Modelo",
-                ["fast", "accurate"],
-                index=1
-            )
+            model_type = st.selectbox("Tipo de Modelo", ["fast", "accurate"], index=1)
             st.session_state.config = {'model_type': model_type}
         
         elif selected_tool == 'OCR.Space':
@@ -152,101 +171,62 @@ def process_file():
     
     if uploaded_file:
         try:
-            # Verificação do arquivo
             file_bytes = uploaded_file.read()
             if len(file_bytes) == 0:
                 raise ValueError("Arquivo vazio ou corrompido")
             
-            # Conversão para imagens
+            # Converter para imagens
             if uploaded_file.type == "application/pdf":
-                images = convert_from_bytes(
-                    file_bytes,
-                    dpi=300,
-                    poppler_path="/usr/bin"
-                )
+                images = convert_from_bytes(file_bytes, dpi=300, poppler_path="/usr/bin")
                 st.info(f"PDF convertido em {len(images)} página(s)")
             else:
                 images = [Image.open(io.BytesIO(file_bytes))]
             
-            # Processamento OCR
-            with st.spinner(f"Processando com {st.session_state.ocr_tool}..."):
-                text = ""
-                
-                if st.session_state.ocr_tool == 'Tesseract':
-                    custom_config = f"--psm {st.session_state.config['psm']} --oem {st.session_state.config['oem']} -l {st.session_state.config['lang']}"
-                    text = "\n".join([
-                        pytesseract.image_to_string(
-                            preprocess_image(np.array(img)), 
-                            config=custom_config
-                        ) for img in images
-                    ])
-                
-                elif st.session_state.ocr_tool == 'EasyOCR':
-                    reader = easyocr.Reader(st.session_state.config['langs'], gpu=False)
-                    text = "\n".join([
-                        "\n".join([res[1] for res in reader.readtext(np.array(img))])
-                        for img in images
-                    ])
-                
-                elif st.session_state.ocr_tool == 'DocTR':
-                    predictor = ocr_predictor(
-                        det_arch='db_resnet50' if st.session_state.config['model_type'] == 'accurate' else 'db_mobilenet_v3_large',
-                        reco_arch='crnn_vgg16_bn' if st.session_state.config['model_type'] == 'accurate' else 'crnn_mobilenet_v3_small',
-                        pretrained=True
-                    )
-                    text = "\n".join([
-                        "\n".join([
-                            " ".join([w.value for w in line.words]) 
-                            for block in predictor([np.array(img)]).pages[0].blocks 
-                            for line in block.lines
-                        ]) for img in images
-                    ])
-                
-                elif st.session_state.ocr_tool == 'OCR.Space':
-                    texts = []
-                    for img in images:
-                        img_byte_arr = io.BytesIO()
-                        img.save(img_byte_arr, format='PNG')
-                        response = requests.post(
-                            'https://api.ocr.space/parse/image',
-                            files={'file': img_byte_arr.getvalue()},
-                            data={
-                                'apikey': st.session_state.config['api_key'],
-                                'language': st.session_state.config['language']
-                            }
-                        )
-                        result = response.json()
-                        if result.get('IsErroredOnProcessing', False):
-                            raise Exception(f"API Error: {result.get('ErrorMessage', 'Erro desconhecido')}")
-                        texts.append(result['ParsedResults'][0]['ParsedText'])
-                    text = "\n".join(texts)
-                
-                elif st.session_state.ocr_tool == 'Taggun':
-                    img_byte_arr = io.BytesIO()
-                    images[0].save(img_byte_arr, format='PNG')
-                    response = requests.post(
-                        'https://api.taggun.io/api/receipt/v1/simple/file',
-                        headers={'apikey': st.session_state.config['api_key']},
-                        files={'file': img_byte_arr.getvalue()},
-                        data={'language': st.session_state.config['language']}
-                    )
-                    response.raise_for_status()
-                    text = response.json().get('text', '')
-                
-                texto_corrigido = correct_text_format(text)
-                
-                # Validação e exibição
-                if validate_extracted_text(texto_corrigido):
-                    st.success("✅ Validação bem-sucedida!")
-                else:
-                    st.warning("⚠️ Possíveis problemas na extração")
-                
-                st.download_button(
-                    "💾 Baixar Texto",
-                    texto_corrigido,
-                    file_name=f"texto_{st.session_state.ocr_tool}.txt"
+            text = ""
+            tool = st.session_state.ocr_tool
+            config = st.session_state.config
+            
+            # Processar OCR
+            if tool == 'Tesseract':
+                custom_config = f"--psm {config['psm']} --oem {config['oem']} -l {config['lang']}"
+                text = "\n".join([pytesseract.image_to_string(preprocess_image(np.array(img)), config=custom_config) for img in images])
+            
+            elif tool == 'EasyOCR':
+                reader = load_easyocr(config['langs'])
+                text = "\n".join(["\n".join([res[1] for res in reader.readtext(np.array(img))]) for img in images])
+            
+            elif tool == 'DocTR':
+                predictor = ocr_predictor(
+                    det_arch='db_resnet50' if config['model_type'] == 'accurate' else 'db_mobilenet_v3_large',
+                    reco_arch='crnn_vgg16_bn' if config['model_type'] == 'accurate' else 'crnn_mobilenet_v3_small',
+                    pretrained=True
                 )
-                st.text_area("📝 Texto Extraído", texto_corrigido, height=400)
+                text = "\n".join(["\n".join([" ".join([w.value for w in line.words]) for block in predictor([np.array(img)]).pages[0].blocks for line in block.lines]) for img in images])
+            
+            elif tool == 'OCR.Space':
+                text = "\n".join([handle_ocrspace_api(img, config) for img in images])
+            
+            elif tool == 'Taggun':
+                img_byte_arr = io.BytesIO()
+                images[0].save(img_byte_arr, format='PNG')
+                response = requests.post(
+                    'https://api.taggun.io/api/receipt/v1/simple/file',
+                    headers={'apikey': config['api_key']},
+                    files={'file': img_byte_arr.getvalue()},
+                    data={'language': config['language']}
+                )
+                response.raise_for_status()
+                text = response.json().get('text', '')
+            
+            texto_corrigido = correct_text_format(text)
+            
+            if validate_extracted_text(texto_corrigido):
+                st.success("✅ Validação bem-sucedida!")
+            else:
+                st.warning("⚠️ Possíveis problemas na extração")
+            
+            st.download_button("💾 Baixar Texto", texto_corrigido, file_name=f"texto_{tool}.txt")
+            st.text_area("📝 Texto Extraído", texto_corrigido, height=400)
         
         except Exception as e:
             st.error(f"❌ Erro: {str(e)}")
