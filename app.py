@@ -3,12 +3,12 @@ import streamlit as st
 import pytesseract
 import cv2
 import numpy as np
-import tempfile
 import re
 import logging
 import requests
 import io
 import traceback
+import easyocr
 from pdf2image import convert_from_bytes
 from PIL import Image
 from doctr.models import ocr_predictor
@@ -170,13 +170,23 @@ def process_file():
             
             # Processamento OCR
             with st.spinner(f"Processando com {st.session_state.ocr_tool}..."):
+                text = ""
+                
                 if st.session_state.ocr_tool == 'Tesseract':
                     custom_config = f"--psm {st.session_state.config['psm']} --oem {st.session_state.config['oem']} -l {st.session_state.config['lang']}"
-                    text = "\n".join([pytesseract.image_to_string(preprocess_image(np.array(img)), config=custom_config) for img in images])
+                    text = "\n".join([
+                        pytesseract.image_to_string(
+                            preprocess_image(np.array(img)), 
+                            config=custom_config
+                        ) for img in images
+                    ])
                 
                 elif st.session_state.ocr_tool == 'EasyOCR':
                     reader = easyocr.Reader(st.session_state.config['langs'], gpu=False)
-                    text = "\n".join(["\n".join([res[1] for res in reader.readtext(np.array(img))]) for img in images])
+                    text = "\n".join([
+                        "\n".join([res[1] for res in reader.readtext(np.array(img))])
+                        for img in images
+                    ])
                 
                 elif st.session_state.ocr_tool == 'DocTR':
                     predictor = ocr_predictor(
@@ -184,7 +194,13 @@ def process_file():
                         reco_arch='crnn_vgg16_bn' if st.session_state.config['model_type'] == 'accurate' else 'crnn_mobilenet_v3_small',
                         pretrained=True
                     )
-                    text = "\n".join(["\n".join([" ".join([w.value for w in line.words]) for block in predictor([np.array(img)]).pages[0].blocks for line in block.lines]) for img in images])
+                    text = "\n".join([
+                        "\n".join([
+                            " ".join([w.value for w in line.words]) 
+                            for block in predictor([np.array(img)]).pages[0].blocks 
+                            for line in block.lines
+                        ]) for img in images
+                    ])
                 
                 elif st.session_state.ocr_tool == 'OCR.Space':
                     texts = []
@@ -194,9 +210,15 @@ def process_file():
                         response = requests.post(
                             'https://api.ocr.space/parse/image',
                             files={'file': img_byte_arr.getvalue()},
-                            data={'apikey': st.session_state.config['api_key'], 'language': st.session_state.config['language']}
+                            data={
+                                'apikey': st.session_state.config['api_key'],
+                                'language': st.session_state.config['language']
+                            }
                         )
-                        texts.append(response.json()['ParsedResults'][0]['ParsedText'])
+                        result = response.json()
+                        if result.get('IsErroredOnProcessing', False):
+                            raise Exception(f"API Error: {result.get('ErrorMessage', 'Erro desconhecido')}")
+                        texts.append(result['ParsedResults'][0]['ParsedText'])
                     text = "\n".join(texts)
                 
                 elif st.session_state.ocr_tool == 'Taggun':
@@ -208,7 +230,8 @@ def process_file():
                         files={'file': img_byte_arr.getvalue()},
                         data={'language': st.session_state.config['language']}
                     )
-                    text = response.json()['text']
+                    response.raise_for_status()
+                    text = response.json().get('text', '')
                 
                 texto_corrigido = correct_text_format(text)
                 
