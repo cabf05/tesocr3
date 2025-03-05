@@ -1,0 +1,7 @@
+[server]
+maxUploadSize = 200  # Tamanho máximo em MB
+enableCORS = false
+enableXsrfProtection = false
+
+[runner]
+magicEnabled = false
