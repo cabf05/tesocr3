@@ -13,7 +13,9 @@ from pdf2image import convert_from_bytes
 from PIL import Image
 from doctr.models import ocr_predictor
 
-# Configurações iniciais
+# ===========================================
+# CONFIGURAÇÕES INICIAIS
+# ===========================================
 os.environ["TESSDATA_PREFIX"] = "/usr/share/tesseract-ocr/4.00/tessdata/"
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
@@ -21,7 +23,9 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Inicialização do session state
+# ===========================================
+# GERENCIAMENTO DE ESTADO
+# ===========================================
 if 'page' not in st.session_state:
     st.session_state.page = 'config'
 if 'ocr_tool' not in st.session_state:
@@ -29,87 +33,116 @@ if 'ocr_tool' not in st.session_state:
 if 'config' not in st.session_state:
     st.session_state.config = {}
 
-def setup_ocr_tool():
-    """Configura os parâmetros iniciais para cada ferramenta OCR"""
-    tools = {
-        'Tesseract': {
-            'params': ['psm', 'oem', 'lang'],
-            'defaults': {'psm': 6, 'oem': 3, 'lang': 'por+eng'}
-        },
-        'EasyOCR': {
-            'params': ['langs'],
-            'defaults': {'langs': ['pt', 'en']}
-        },
-        'DocTR': {
-            'params': ['model_type'],
-            'defaults': {'model_type': 'accurate'}
-        },
-        'OCR.Space': {
-            'params': ['api_key', 'language'],
-            'defaults': {'language': 'por'}
-        },
-        'Taggun': {
-            'params': ['api_key', 'language'],
-            'defaults': {'language': 'por'}
-        }
-    }
-    return tools
+# ===========================================
+# FUNÇÕES AUXILIARES
+# ===========================================
+def preprocess_image(image, binarization_threshold=31, denoise_strength=10):
+    """Melhora a qualidade da imagem para OCR."""
+    try:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        denoised = cv2.fastNlMeansDenoising(gray, h=denoise_strength, 
+                                          templateWindowSize=7, searchWindowSize=21)
+        thresh = cv2.adaptiveThreshold(denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                      cv2.THRESH_BINARY, binarization_threshold, 2)
+        return thresh
+    except Exception as e:
+        logger.error(f"Erro no pré-processamento: {e}")
+        st.error(f"Erro no pré-processamento: {e}")
+        return None
 
+def correct_text_format(text):
+    """Corrige formatos comuns de texto em NFS-e."""
+    corrections = {
+        r'(\d{2})[\.]?(\d{3})[\.]?(\d{3})[/]?0001[-]?(\d{2})': r'\1.\2.\3/0001-\4',
+        r'(\d{2})[\/.-](\d{2})[\/.-](\d{4})': r'\1/\2/\3',
+        r'R\$ (\d+)[,.](\d{2})': r'R$\1,\2'
+    }
+    for pattern, replacement in corrections.items():
+        text = re.sub(pattern, replacement, text)
+    return text
+
+def validate_extracted_text(text):
+    """Valida se o texto contém informações chave."""
+    required_patterns = [
+        r'NOTA FISCAL DE SERVIÇOS ELETRÔNICA',
+        r'CNPJ',
+        r'Valor Total',
+        r'Data e Hora de Emissão'
+    ]
+    for pattern in required_patterns:
+        if not re.search(pattern, text, re.IGNORECASE):
+            return False
+    return True
+
+# ===========================================
+# PÁGINA DE CONFIGURAÇÃO
+# ===========================================
 def show_config_page():
-    """Página de seleção e configuração da ferramenta OCR"""
+    """Interface de configuração do OCR"""
     st.title("⚙️ Configuração do Sistema OCR")
     
-    tools = setup_ocr_tool()
+    # Seleção da ferramenta
+    tools = {
+        'Tesseract': {'icon': '🔍', 'desc': 'Documentos impressos de alta qualidade'},
+        'EasyOCR': {'icon': '🎨', 'desc': 'Imagens com fundo complexo'},
+        'DocTR': {'icon': '🧠', 'desc': 'Layouts complexos com deep learning'},
+        'OCR.Space': {'icon': '🌐', 'desc': 'API externa para múltiplos formatos'},
+        'Taggun': {'icon': '🧾', 'desc': 'Documentos fiscais/recibos'}
+    }
+    
     selected_tool = st.selectbox(
         "Selecione a ferramenta OCR:",
         list(tools.keys()),
-        index=0
+        format_func=lambda x: f"{tools[x]['icon']} {x} - {tools[x]['desc']}"
     )
-    
-    st.session_state.ocr_tool = selected_tool
-    st.session_state.config = tools[selected_tool]['defaults'].copy()
     
     # Configurações específicas
     with st.expander("🔧 Configurações Avançadas", expanded=True):
         if selected_tool == 'Tesseract':
             col1, col2 = st.columns(2)
             with col1:
-                st.session_state.config['psm'] = st.slider("Modo Segmentação (PSM)", 3, 13, 6)
+                psm = st.slider("Modo Segmentação (PSM)", 3, 13, 6)
             with col2:
-                st.session_state.config['oem'] = st.slider("Motor OCR (OEM)", 1, 3, 3)
-            st.session_state.config['lang'] = st.text_input("Idiomas (ex: por+eng)", "por+eng")
+                oem = st.slider("Motor OCR (OEM)", 1, 3, 3)
+            lang = st.text_input("Idiomas (ex: por+eng)", "por+eng")
+            st.session_state.config = {'psm': psm, 'oem': oem, 'lang': lang}
         
         elif selected_tool == 'EasyOCR':
-            st.session_state.config['langs'] = st.multiselect(
+            langs = st.multiselect(
                 "Idiomas",
                 ['en', 'pt'],
                 default=['pt', 'en']
             )
+            st.session_state.config = {'langs': langs}
         
         elif selected_tool == 'DocTR':
-            st.session_state.config['model_type'] = st.selectbox(
+            model_type = st.selectbox(
                 "Tipo de Modelo",
                 ["fast", "accurate"],
                 index=1
             )
+            st.session_state.config = {'model_type': model_type}
         
-        elif selected_tool in ['OCR.Space', 'Taggun']:
-            st.session_state.config['api_key'] = st.text_input(
-                "Chave API",
-                type="password",
-                help="Obtenha em https://ocr.space/API ou https://taggun.io"
-            )
-            st.session_state.config['language'] = st.selectbox(
-                "Idioma",
-                ["por", "eng"]
-            )
+        elif selected_tool == 'OCR.Space':
+            api_key = st.text_input("Chave API", type="password")
+            language = st.selectbox("Idioma", ["por", "eng"])
+            st.session_state.config = {'api_key': api_key, 'language': language}
+        
+        elif selected_tool == 'Taggun':
+            api_key = st.text_input("Chave API", type="password")
+            language = st.selectbox("Idioma", ["por", "eng"])
+            st.session_state.config = {'api_key': api_key, 'language': language}
     
     if st.button("✅ Salvar Configurações"):
+        st.session_state.ocr_tool = selected_tool
         st.session_state.page = 'process'
         st.rerun()
 
+# ===========================================
+# PÁGINA DE PROCESSAMENTO
+# ===========================================
 def process_file():
-    """Página de processamento do arquivo"""
+    """Interface de processamento de documentos"""
     st.title("📄 Processamento de Documentos")
     
     uploaded_file = st.file_uploader(
@@ -119,12 +152,12 @@ def process_file():
     
     if uploaded_file:
         try:
+            # Verificação do arquivo
             file_bytes = uploaded_file.read()
-            
             if len(file_bytes) == 0:
                 raise ValueError("Arquivo vazio ou corrompido")
             
-            # Processar PDF
+            # Conversão para imagens
             if uploaded_file.type == "application/pdf":
                 images = convert_from_bytes(
                     file_bytes,
@@ -135,10 +168,51 @@ def process_file():
             else:
                 images = [Image.open(io.BytesIO(file_bytes))]
             
+            # Processamento OCR
             with st.spinner(f"Processando com {st.session_state.ocr_tool}..."):
-                texto = process_ocr(images)
-                texto_corrigido = correct_text_format(texto)
+                if st.session_state.ocr_tool == 'Tesseract':
+                    custom_config = f"--psm {st.session_state.config['psm']} --oem {st.session_state.config['oem']} -l {st.session_state.config['lang']}"
+                    text = "\n".join([pytesseract.image_to_string(preprocess_image(np.array(img)), config=custom_config) for img in images])
                 
+                elif st.session_state.ocr_tool == 'EasyOCR':
+                    reader = easyocr.Reader(st.session_state.config['langs'], gpu=False)
+                    text = "\n".join(["\n".join([res[1] for res in reader.readtext(np.array(img))]) for img in images])
+                
+                elif st.session_state.ocr_tool == 'DocTR':
+                    predictor = ocr_predictor(
+                        det_arch='db_resnet50' if st.session_state.config['model_type'] == 'accurate' else 'db_mobilenet_v3_large',
+                        reco_arch='crnn_vgg16_bn' if st.session_state.config['model_type'] == 'accurate' else 'crnn_mobilenet_v3_small',
+                        pretrained=True
+                    )
+                    text = "\n".join(["\n".join([" ".join([w.value for w in line.words]) for block in predictor([np.array(img)]).pages[0].blocks for line in block.lines]) for img in images])
+                
+                elif st.session_state.ocr_tool == 'OCR.Space':
+                    texts = []
+                    for img in images:
+                        img_byte_arr = io.BytesIO()
+                        img.save(img_byte_arr, format='PNG')
+                        response = requests.post(
+                            'https://api.ocr.space/parse/image',
+                            files={'file': img_byte_arr.getvalue()},
+                            data={'apikey': st.session_state.config['api_key'], 'language': st.session_state.config['language']}
+                        )
+                        texts.append(response.json()['ParsedResults'][0]['ParsedText'])
+                    text = "\n".join(texts)
+                
+                elif st.session_state.ocr_tool == 'Taggun':
+                    img_byte_arr = io.BytesIO()
+                    images[0].save(img_byte_arr, format='PNG')
+                    response = requests.post(
+                        'https://api.taggun.io/api/receipt/v1/simple/file',
+                        headers={'apikey': st.session_state.config['api_key']},
+                        files={'file': img_byte_arr.getvalue()},
+                        data={'language': st.session_state.config['language']}
+                    )
+                    text = response.json()['text']
+                
+                texto_corrigido = correct_text_format(text)
+                
+                # Validação e exibição
                 if validate_extracted_text(texto_corrigido):
                     st.success("✅ Validação bem-sucedida!")
                 else:
@@ -159,66 +233,9 @@ def process_file():
         st.session_state.page = 'config'
         st.rerun()
 
-def process_ocr(images):
-    """Executa o OCR de acordo com a ferramenta selecionada"""
-    tool = st.session_state.ocr_tool
-    config = st.session_state.config
-    
-    try:
-        if tool == 'Tesseract':
-            custom_config = f"--psm {config['psm']} --oem {config['oem']} -l {config['lang']}"
-            return "\n".join([pytesseract.image_to_string(preprocess_image(np.array(img)), config=custom_config) for img in images])
-        
-        elif tool == 'EasyOCR':
-            reader = easyocr.Reader(config['langs'], gpu=False)
-            return "\n".join(["\n".join([res[1] for res in reader.readtext(np.array(img))]) for img in images])
-        
-        elif tool == 'DocTR':
-            predictor = ocr_predictor(
-                det_arch='db_resnet50' if config['model_type'] == 'accurate' else 'db_mobilenet_v3_large',
-                reco_arch='crnn_vgg16_bn' if config['model_type'] == 'accurate' else 'crnn_mobilenet_v3_small',
-                pretrained=True
-            )
-            return "\n".join(["\n".join([" ".join([w.value for w in line.words]) for block in predictor([np.array(img)]).pages[0].blocks for line in block.lines]) for img in images])
-        
-        elif tool == 'OCR.Space':
-            texts = []
-            for img in images:
-                img_byte_arr = io.BytesIO()
-                img.save(img_byte_arr, format='PNG')
-                response = requests.post(
-                    'https://api.ocr.space/parse/image',
-                    files={'file': img_byte_arr.getvalue()},
-                    data={'apikey': config['api_key'], 'language': config['language']}
-                )
-                texts.append(response.json()['ParsedResults'][0]['ParsedText'])
-            return "\n".join(texts)
-        
-        elif tool == 'Taggun':
-            img_byte_arr = io.BytesIO()
-            images[0].save(img_byte_arr, format='PNG')
-            response = requests.post(
-                'https://api.taggun.io/api/receipt/v1/simple/file',
-                headers={'apikey': config['api_key']},
-                files={'file': img_byte_arr.getvalue()},
-                data={'language': config['language']}
-            )
-            return response.json()['text']
-    
-    except Exception as e:
-        raise RuntimeError(f"Falha no {tool}: {str(e)}")
-
-# Funções auxiliares mantidas conforme necessidade
-def preprocess_image(image, binarization_threshold=31, denoise_strength=10):
-    # ... (manter implementação anterior) ...
-
-def correct_text_format(text):
-    # ... (manter implementação anterior) ...
-
-def validate_extracted_text(text):
-    # ... (manter implementação anterior) ...
-
-# Controle de fluxo principal
+# ===========================================
+# CONTROLE PRINCIPAL
+# ===========================================
 if st.session_state.page == 'config':
     show_config_page()
 else:
