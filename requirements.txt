@@ -1,4 +1,5 @@
 streamlit
-ollama
+easyocr
 pdf2image
-Pillow
+numpy
+pillow
