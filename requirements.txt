@@ -1,11 +1,2 @@
-streamlit==1.32.2
-pytesseract==0.3.10
-pdf2image==1.17.0
-opencv-python-headless==4.9.0.80
-numpy==1.26.4
-pillow==10.2.0
-easyocr==1.7.1
-python-doctr[torch]==0.8.1
-requests==2.31.0
-torch==2.3.0 --extra-index-url https://download.pytorch.org/whl/cpu
-torchvision==0.18.0 --extra-index-url https://download.pytorch.org/whl/cpu
+streamlit
+requests
