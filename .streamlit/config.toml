@@ -1,5 +1,3 @@
 [server]
 headless = true
-enableCORS = false
-enableXsrfProtection = false
-maxUploadSize = 200
+runOnSave = true
