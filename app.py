@@ -3,12 +3,7 @@ from ollama import generate  # Importa Ollama-OCR
 from pdf2image import convert_from_bytes
 from PIL import Image
 import io
-import os
-
-# Corrigir erro de Poppler no ambiente local (caso rode fora do Streamlit Cloud)
-POPPLER_PATH = "/usr/bin/poppler"  # Caminho padrão no Linux
-if not os.path.exists(POPPLER_PATH):
-    POPPLER_PATH = None  # Streamlit Cloud já terá o pacote instalado via packages.txt
+import base64
 
 # Título da aplicação
 st.title("OCR com Ollama no Streamlit Cloud")
@@ -20,21 +15,21 @@ if uploaded_file:
     st.write("Arquivo recebido:", uploaded_file.name)
 
     try:
-        # Converter PDF para imagens (agora com Poppler instalado corretamente)
-        images = convert_from_bytes(uploaded_file.read(), poppler_path=POPPLER_PATH)
+        # Converter PDF para imagens
+        images = convert_from_bytes(uploaded_file.read())
 
         # Processar cada página do PDF
         extracted_text = ""
         for i, img in enumerate(images):
             st.image(img, caption=f"Página {i+1}", use_column_width=True)
 
-            # Converte a imagem para bytes
-            img_bytes = io.BytesIO()
-            img.save(img_bytes, format="PNG")
-            img_bytes = img_bytes.getvalue()
+            # Converter imagem para Base64
+            img_buffer = io.BytesIO()
+            img.save(img_buffer, format="PNG")
+            img_base64 = base64.b64encode(img_buffer.getvalue()).decode("utf-8")
 
-            # Enviar para Ollama-OCR
-            response = generate("ocr", img_bytes)  # Usa o modelo OCR do Ollama
+            # Enviar para Ollama OCR
+            response = generate(model="ocr", prompt=img_base64)  
             extracted_text += f"\n\nPágina {i+1}:\n{response}"
 
         # Exibir texto extraído
