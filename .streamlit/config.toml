@@ -1,7 +1,5 @@
 [server]
-maxUploadSize = 200  # Tamanho máximo em MB
+headless = true
 enableCORS = false
 enableXsrfProtection = false
-
-[runner]
-magicEnabled = false
+maxUploadSize = 200
