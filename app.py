@@ -1,13 +1,13 @@
 import streamlit as st
 import easyocr
-import pdf2image
+import fitz  # pymupdf
 import numpy as np
 from PIL import Image
 
-# Inicializa o leitor OCR do EasyOCR
+# Inicializa o leitor OCR
 @st.cache_resource
 def load_easyocr():
-    return easyocr.Reader(['pt', 'en'])  # Suporte para português e inglês
+    return easyocr.Reader(['pt', 'en'])
 
 reader = load_easyocr()
 
@@ -18,28 +18,29 @@ uploaded_file = st.file_uploader("Faça upload de um arquivo PDF", type=["pdf"])
 if uploaded_file:
     st.write("📤 Processando o arquivo...")
 
-    # Converte o PDF para imagens (uma imagem por página)
-    images = pdf2image.convert_from_bytes(uploaded_file.read())
-
-    st.write(f"📄 O PDF tem {len(images)} páginas.")
-
-    extracted_text = ""
+    # Abre o PDF com pymupdf
+    doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
     
-    for i, image in enumerate(images):
-        st.image(image, caption=f"Página {i+1}", use_column_width=True)
+    extracted_text = ""
 
-        # Converte a imagem para numpy array (necessário para o EasyOCR)
-        img_array = np.array(image)
+    for i, page in enumerate(doc):
+        # Converte a página do PDF em imagem
+        pix = page.get_pixmap()
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
-        # Executa o OCR
-        result = reader.readtext(img_array, detail=0)  # `detail=0` retorna apenas o texto
+        st.image(img, caption=f"Página {i+1}", use_column_width=True)
 
-        # Junta os textos extraídos
+        # Converte para numpy array para o OCR
+        img_array = np.array(img)
+
+        # Executa OCR na imagem
+        result = reader.readtext(img_array, detail=0)
+
         extracted_text += f"\n\n📜 **Página {i+1}:**\n" + "\n".join(result)
 
     # Exibe o texto extraído
     st.subheader("📑 Texto extraído:")
     st.text_area("Texto OCR", extracted_text, height=300)
 
-    # Permite baixar o texto extraído
+    # Baixar texto extraído
     st.download_button("📥 Baixar texto extraído", extracted_text, file_name="texto_extraido.txt")
