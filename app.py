@@ -23,10 +23,15 @@ def process_file():
             return
         
         api_key = st.session_state["ocr_api_key"]
-        files = {"file": uploaded_file.getvalue()}
-        payload = {"apikey": api_key, "language": "eng"}
         
-        response = requests.post("https://api.ocr.space/parse/image", files=files, data=payload)
+        with open("temp_file", "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        
+        with open("temp_file", "rb") as f:
+            files = {"file": f}
+            payload = {"apikey": api_key, "language": "eng"}
+            response = requests.post("https://api.ocr.space/parse/image", files=files, data=payload)
+        
         result = response.json()
         
         if response.status_code == 200 and result.get("ParsedResults"):
