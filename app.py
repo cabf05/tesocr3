@@ -1,40 +1,45 @@
 import streamlit as st
-from ollama import generate  # Importa Ollama-OCR
-from pdf2image import convert_from_bytes
+import easyocr
+import pdf2image
+import numpy as np
 from PIL import Image
-import io
-import base64
 
-# Título da aplicação
-st.title("OCR com Ollama no Streamlit Cloud")
+# Inicializa o leitor OCR do EasyOCR
+@st.cache_resource
+def load_easyocr():
+    return easyocr.Reader(['pt', 'en'])  # Suporte para português e inglês
 
-# Upload do PDF
-uploaded_file = st.file_uploader("Envie um arquivo PDF", type="pdf")
+reader = load_easyocr()
+
+st.title("📄 OCR de PDFs com EasyOCR")
+
+uploaded_file = st.file_uploader("Faça upload de um arquivo PDF", type=["pdf"])
 
 if uploaded_file:
-    st.write("Arquivo recebido:", uploaded_file.name)
+    st.write("📤 Processando o arquivo...")
 
-    try:
-        # Converter PDF para imagens
-        images = convert_from_bytes(uploaded_file.read())
+    # Converte o PDF para imagens (uma imagem por página)
+    images = pdf2image.convert_from_bytes(uploaded_file.read())
 
-        # Processar cada página do PDF
-        extracted_text = ""
-        for i, img in enumerate(images):
-            st.image(img, caption=f"Página {i+1}", use_column_width=True)
+    st.write(f"📄 O PDF tem {len(images)} páginas.")
 
-            # Converter imagem para Base64
-            img_buffer = io.BytesIO()
-            img.save(img_buffer, format="PNG")
-            img_base64 = base64.b64encode(img_buffer.getvalue()).decode("utf-8")
+    extracted_text = ""
+    
+    for i, image in enumerate(images):
+        st.image(image, caption=f"Página {i+1}", use_column_width=True)
 
-            # Enviar para Ollama OCR
-            response = generate(model="ocr", prompt=img_base64)  
-            extracted_text += f"\n\nPágina {i+1}:\n{response}"
+        # Converte a imagem para numpy array (necessário para o EasyOCR)
+        img_array = np.array(image)
 
-        # Exibir texto extraído
-        st.subheader("Texto extraído:")
-        st.text_area("Resultado OCR", extracted_text, height=300)
+        # Executa o OCR
+        result = reader.readtext(img_array, detail=0)  # `detail=0` retorna apenas o texto
 
-    except Exception as e:
-        st.error(f"Erro ao processar o PDF: {e}")
+        # Junta os textos extraídos
+        extracted_text += f"\n\n📜 **Página {i+1}:**\n" + "\n".join(result)
+
+    # Exibe o texto extraído
+    st.subheader("📑 Texto extraído:")
+    st.text_area("Texto OCR", extracted_text, height=300)
+
+    # Permite baixar o texto extraído
+    st.download_button("📥 Baixar texto extraído", extracted_text, file_name="texto_extraido.txt")
