@@ -1,0 +1,4 @@
+streamlit
+ollama
+pdf2image
+Pillow
